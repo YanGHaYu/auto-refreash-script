@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         页面自动刷新助手
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
-// @description  定时刷新当前页面，支持自定义间隔、启停控制和倒计时显示
+// @version      1.1.0
+// @description  定时刷新当前页面，支持白名单站点、自定义间隔、启停控制和倒计时显示
 // @author       You
 // @match        *://*/*
 // @grant        GM_setValue
@@ -27,17 +27,10 @@
     /** 最大间隔（秒） */
     const MAX_INTERVAL = 3600;
 
-    /** 白名单模式是否开启（true = 仅白名单页面生效） */
-    const DEFAULT_WHITELIST_ENABLED = false;
-
-    /** 默认白名单 URL 模式列表（支持通配符 *） */
-    const DEFAULT_WHITELIST_URLS = [];
-
     /** 存储键名 */
     const STORAGE_KEY_ENABLED = 'AUTO_REFRESH_ENABLED';
     const STORAGE_KEY_INTERVAL = 'AUTO_REFRESH_INTERVAL';
-    const STORAGE_KEY_WHITELIST_ENABLED = 'AUTO_REFRESH_WHITELIST_ENABLED';
-    const STORAGE_KEY_WHITELIST_URLS = 'AUTO_REFRESH_WHITELIST_URLS';
+    const STORAGE_KEY_WHITELIST = 'AUTO_REFRESH_WHITELIST';
 
     // ============================================================
     //  状态
@@ -49,15 +42,8 @@
     /** 刷新间隔（秒） */
     let intervalSec = Math.max(MIN_INTERVAL, GM_getValue(STORAGE_KEY_INTERVAL, DEFAULT_INTERVAL));
 
-    /** 白名单模式是否开启 */
-    let whitelistEnabled = GM_getValue(STORAGE_KEY_WHITELIST_ENABLED, DEFAULT_WHITELIST_ENABLED);
-
-    /** 白名单 URL 模式列表 */
-    let whitelistUrls = GM_getValue(STORAGE_KEY_WHITELIST_URLS, DEFAULT_WHITELIST_URLS);
-
-    /** 白名单 UI 引用 */
-    let whitelistToggle = null;
-    let whitelistContainer = null;
+    /** 白名单域名列表 */
+    let whitelist = GM_getValue(STORAGE_KEY_WHITELIST, []);
 
     /** 倒计时剩余秒数 */
     let countdown = intervalSec;
@@ -71,17 +57,33 @@
     let countdownText = null;
     let toggleBtn = null;
     let intervalInput = null;
+    let siteDomainText = null;
+    let whitelistIndicator = null;
+    let whitelistBtn = null;
 
     // ============================================================
     //  工具
     // ============================================================
 
+    /** 获取当前页面的域名（hostname） */
+    function getCurrentDomain() {
+        return window.location.hostname;
+    }
+
+    /** 判断当前站点是否在白名单中 */
+    function isCurrentSiteWhitelisted() {
+        return whitelist.indexOf(getCurrentDomain()) !== -1;
+    }
+
     /** 持久化当前状态 */
     function saveState() {
         GM_setValue(STORAGE_KEY_ENABLED, enabled);
         GM_setValue(STORAGE_KEY_INTERVAL, intervalSec);
-        GM_setValue(STORAGE_KEY_WHITELIST_ENABLED, whitelistEnabled);
-        GM_setValue(STORAGE_KEY_WHITELIST_URLS, whitelistUrls);
+    }
+
+    /** 持久化白名单 */
+    function saveWhitelist() {
+        GM_setValue(STORAGE_KEY_WHITELIST, whitelist);
     }
 
     /** 刷新页面 */
@@ -89,68 +91,54 @@
         window.location.reload();
     }
 
-    /**
-     * 检查当前 URL 是否匹配白名单中的任一模式
-     * 模式支持：
-     *   - 精确匹配：https://example.com/page
-     *   - 前缀匹配：https://example.com/*  （以 * 结尾）
-     *   - 包含匹配：*example.com*          （中间含 *）
-     *   - 通配符匹配：*.example.com/*       （完整 glob）
-     */
-    function isUrlMatchWhitelist(url, patterns) {
-        if (!patterns || patterns.length === 0) return false;
-        const urlStr = url.toLowerCase();
-        return patterns.some(pattern => {
-            const p = pattern.toLowerCase().trim();
-            if (!p) return false;
-            if (p === '*') return true;
-            // 将 glob 模式转为正则（* → .+?，其他正则特殊字符转义）
-            const regexStr = p.replace(/[-\/\\^$+?.()|[\]{}]/g, '\\$&').replace(/\*/g, '.+?');
-            return new RegExp('^' + regexStr + '$').test(urlStr);
-        });
+    // ============================================================
+    //  白名单管理
+    // ============================================================
+
+    /** 将当前站点域名加入白名单 */
+    function addCurrentToWhitelist() {
+        const domain = getCurrentDomain();
+        if (whitelist.indexOf(domain) !== -1) return; // 已在白名单中
+        whitelist.push(domain);
+        saveWhitelist();
+        updatePanel();
+        showToast('已加入白名单：' + domain);
+        // 如果已开启，立即启动定时器
+        if (enabled) {
+            startTimer();
+        }
     }
 
-    /** 切换白名单模式 */
+    /** 将当前站点域名从白名单移出 */
+    function removeCurrentFromWhitelist() {
+        const domain = getCurrentDomain();
+        const idx = whitelist.indexOf(domain);
+        if (idx === -1) return; // 不在白名单中
+        whitelist.splice(idx, 1);
+        saveWhitelist();
+        stopTimer(); // 移出白名单时停止计时
+        updatePanel();
+        showToast('已移出白名单：' + domain);
+    }
+
+    /** 切换当前站点白名单状态 */
     function toggleWhitelist() {
-        whitelistEnabled = !whitelistEnabled;
-        saveState();
-        showToast('白名单模式已' + (whitelistEnabled ? '开启' : '关闭'));
-        if (whitelistEnabled && !isUrlMatchWhitelist(location.href, whitelistUrls)) {
-            // 白名单开启但当前页面不在白名单中
-            showToast('当前页面不在白名单中，自动刷新已停用');
-            disable();
+        if (isCurrentSiteWhitelisted()) {
+            removeCurrentFromWhitelist();
+        } else {
+            addCurrentToWhitelist();
         }
-        updateWhitelistUI();
-    }
-
-    /** 将当前页面 URL 添加到白名单 */
-    function addCurrentPageToWhitelist() {
-        const url = location.href;
-        if (whitelistUrls.includes(url)) {
-            showToast('当前页面已在白名单中');
-            return;
-        }
-        whitelistUrls.push(url);
-        saveState();
-        updateWhitelistUI();
-        showToast('已添加当前页面到白名单');
-    }
-
-    /** 从白名单移除指定 URL */
-    function removeWhitelistUrl(urlToRemove) {
-        whitelistUrls = whitelistUrls.filter(u => u !== urlToRemove);
-        saveState();
-        updateWhitelistUI();
     }
 
     // ============================================================
     //  计时器管理
     // ============================================================
 
-    /** 开始倒计时 */
+    /** 开始倒计时（仅当已开启且当前站点在白名单中时才真正启动） */
     function startTimer() {
         stopTimer();
         if (!enabled) return;
+        if (!isCurrentSiteWhitelisted()) return;
 
         countdown = intervalSec;
         updatePanel();
@@ -182,9 +170,13 @@
         if (enabled) return;
         enabled = true;
         saveState();
-        startTimer();
+        if (isCurrentSiteWhitelisted()) {
+            startTimer();
+            showToast('自动刷新已开启');
+        } else {
+            showToast('已开启，但当前站点不在白名单中');
+        }
         updatePanel();
-        showToast('自动刷新已开启');
     }
 
     function disable() {
@@ -230,7 +222,7 @@
                 border: 1px solid #ddd;
                 border-radius: 8px;
                 padding: 12px 16px;
-                min-width: 200px;
+                min-width: 220px;
                 box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
                 user-select: none;
                 display: flex;
@@ -280,6 +272,32 @@
             #qy-auto-refresh-panel .qy-status .qy-dot.active {
                 background: #52c41a;
                 box-shadow: 0 0 6px rgba(82, 196, 26, 0.5);
+            }
+            #qy-auto-refresh-panel .qy-site-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 6px;
+                font-size: 11px;
+                color: #666;
+                background: #fafafa;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            #qy-auto-refresh-panel .qy-site-row .qy-domain {
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            #qy-auto-refresh-panel .qy-site-row .qy-whitelist-indicator {
+                font-size: 11px;
+                white-space: nowrap;
+            }
+            #qy-auto-refresh-panel .qy-site-row .qy-whitelist-indicator.in {
+                color: #52c41a;
+            }
+            #qy-auto-refresh-panel .qy-site-row .qy-whitelist-indicator.out {
+                color: #999;
             }
             #qy-auto-refresh-panel .qy-countdown {
                 font-size: 24px;
@@ -344,76 +362,30 @@
             #qy-auto-refresh-panel .qy-btn-stop:hover {
                 background: #ff7875;
             }
+            #qy-auto-refresh-panel .qy-btn-whitelist {
+                cursor: pointer;
+                border: 1px solid #d9d9d9;
+                border-radius: 4px;
+                padding: 3px 10px;
+                font-size: 11px;
+                background: #fff;
+                color: #666;
+                transition: all 0.2s;
+                flex: 1;
+            }
+            #qy-auto-refresh-panel .qy-btn-whitelist:hover {
+                border-color: #40a9ff;
+                color: #1890ff;
+            }
+            #qy-auto-refresh-panel .qy-btn-whitelist.remove:hover {
+                border-color: #ff4d4f;
+                color: #ff4d4f;
+            }
             #qy-auto-refresh-panel .qy-hint {
                 font-size: 11px;
                 color: #aaa;
                 text-align: center;
                 margin-top: 2px;
-            }
-            #qy-auto-refresh-panel .qy-whitelist-section {
-                border-top: 1px solid #eee;
-                padding-top: 8px;
-                margin-top: 4px;
-            }
-            #qy-auto-refresh-panel .qy-wl-header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                font-size: 12px;
-                font-weight: bold;
-                margin-bottom: 4px;
-            }
-            #qy-auto-refresh-panel .qy-wl-header label {
-                display: flex;
-                align-items: center;
-                gap: 4px;
-                font-weight: normal;
-                cursor: pointer;
-            }
-            #qy-auto-refresh-panel .qy-wl-header input[type="checkbox"] {
-                cursor: pointer;
-            }
-            #qy-auto-refresh-panel .qy-wl-add-btn {
-                cursor: pointer;
-                background: #1890ff;
-                color: #fff;
-                border: none;
-                border-radius: 3px;
-                padding: 2px 8px;
-                font-size: 11px;
-            }
-            #qy-auto-refresh-panel .qy-wl-add-btn:hover {
-                background: #40a9ff;
-            }
-            #qy-auto-refresh-panel .qy-wl-list {
-                max-height: 120px;
-                overflow-y: auto;
-                margin-top: 4px;
-            }
-            #qy-auto-refresh-panel .qy-wl-item {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                font-size: 11px;
-                padding: 2px 0;
-                color: #666;
-                word-break: break-all;
-            }
-            #qy-auto-refresh-panel .qy-wl-item .qy-wl-del {
-                cursor: pointer;
-                color: #ff4d4f;
-                font-size: 12px;
-                background: none;
-                border: none;
-                padding: 0 2px;
-                flex-shrink: 0;
-                margin-left: 4px;
-            }
-            #qy-auto-refresh-panel .qy-wl-empty {
-                font-size: 11px;
-                color: #ccc;
-                text-align: center;
-                padding: 4px 0;
             }
         `;
         document.head.appendChild(panelStyle);
@@ -444,19 +416,35 @@
         statusText = statusRow.querySelector('#qy-status-text');
         panel.appendChild(statusRow);
 
+        // 当前站点 + 白名单状态行
+        const siteRow = document.createElement('div');
+        siteRow.className = 'qy-site-row';
+        siteRow.innerHTML = `
+            <span class="qy-domain" id="qy-site-domain"></span>
+            <span class="qy-whitelist-indicator" id="qy-whitelist-indicator"></span>
+        `;
+        siteDomainText = siteRow.querySelector('#qy-site-domain');
+        whitelistIndicator = siteRow.querySelector('#qy-whitelist-indicator');
+        panel.appendChild(siteRow);
+
         // 倒计时
         countdownText = document.createElement('div');
         countdownText.className = 'qy-countdown';
         countdownText.textContent = '--';
         panel.appendChild(countdownText);
 
-        // 启停按钮
+        // 启停按钮 + 白名单按钮
         const btnRow = document.createElement('div');
         btnRow.className = 'qy-row';
         toggleBtn = document.createElement('button');
         toggleBtn.className = 'qy-btn';
         toggleBtn.addEventListener('click', toggle);
         btnRow.appendChild(toggleBtn);
+
+        whitelistBtn = document.createElement('button');
+        whitelistBtn.className = 'qy-btn-whitelist';
+        whitelistBtn.addEventListener('click', toggleWhitelist);
+        btnRow.appendChild(whitelistBtn);
         panel.appendChild(btnRow);
 
         // 间隔设置
@@ -476,7 +464,7 @@
             intervalInput.value = val;
             intervalSec = val;
             saveState();
-            if (enabled) {
+            if (enabled && isCurrentSiteWhitelisted()) {
                 // 重新开始倒计时
                 startTimer();
             }
@@ -484,45 +472,6 @@
         });
         intervalRow.appendChild(intervalInput);
         panel.appendChild(intervalRow);
-
-        // 白名单管理区
-        const wlSection = document.createElement('div');
-        wlSection.className = 'qy-whitelist-section';
-
-        // 白名单头部：开关 + 添加按钮
-        const wlHeader = document.createElement('div');
-        wlHeader.className = 'qy-wl-header';
-        const wlLabel = document.createElement('label');
-        whitelistToggle = document.createElement('input');
-        whitelistToggle.type = 'checkbox';
-        whitelistToggle.checked = whitelistEnabled;
-        whitelistToggle.addEventListener('change', () => {
-            whitelistEnabled = whitelistToggle.checked;
-            saveState();
-            showToast('白名单模式已' + (whitelistEnabled ? '开启' : '关闭'));
-            if (whitelistEnabled && !isUrlMatchWhitelist(location.href, whitelistUrls)) {
-                showToast('当前页面不在白名单中，自动刷新已停用');
-                disable();
-            }
-            updateWhitelistUI();
-        });
-        wlLabel.appendChild(whitelistToggle);
-        wlLabel.appendChild(document.createTextNode(' 仅白名单'));
-        wlHeader.appendChild(wlLabel);
-
-        const addBtn = document.createElement('button');
-        addBtn.className = 'qy-wl-add-btn';
-        addBtn.textContent = '+ 添加当前页';
-        addBtn.addEventListener('click', addCurrentPageToWhitelist);
-        wlHeader.appendChild(addBtn);
-        wlSection.appendChild(wlHeader);
-
-        // 白名单列表容器
-        whitelistContainer = document.createElement('div');
-        whitelistContainer.className = 'qy-wl-list';
-        wlSection.appendChild(whitelistContainer);
-
-        panel.appendChild(wlSection);
 
         // 快捷键提示
         const hint = document.createElement('div');
@@ -533,59 +482,66 @@
         document.body.appendChild(panel);
     }
 
-    /** 更新白名单 UI 显示 */
-    function updateWhitelistUI() {
-        if (!whitelistToggle || !whitelistContainer) return;
-
-        whitelistToggle.checked = whitelistEnabled;
-
-        if (!whitelistEnabled || whitelistUrls.length === 0) {
-            if (!whitelistEnabled) {
-                whitelistContainer.innerHTML = '<div class="qy-wl-empty">白名单已关闭，所有页面生效</div>';
-            } else {
-                whitelistContainer.innerHTML = '<div class="qy-wl-empty">白名单为空，无页面生效</div>';
-            }
-            return;
-        }
-
-        whitelistContainer.innerHTML = whitelistUrls.map(url => {
-            const escapedUrl = url.replace(/'/g, "\\'");
-            return `<div class="qy-wl-item">
-                <span title="${escapedUrl}">${escapedUrl}</span>
-                <button class="qy-wl-del" data-url="${escapedUrl}">✕</button>
-            </div>`;
-        }).join('');
-
-        // 绑定删除事件
-        whitelistContainer.querySelectorAll('.qy-wl-del').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const url = btn.getAttribute('data-url');
-                removeWhitelistUrl(url);
-            });
-        });
-    }
-
     /** 更新面板显示 */
     function updatePanel() {
         if (!panel) return;
 
+        const isWhitelisted = isCurrentSiteWhitelisted();
+        const isTimerRunning = (timerId !== null);
+
         // 状态圆点
         const dot = document.querySelector('#qy-auto-refresh-panel .qy-dot');
         if (dot) {
-            dot.classList.toggle('active', enabled);
+            dot.classList.toggle('active', isTimerRunning);
         }
 
+        // 状态文本
         if (statusText) {
-            statusText.textContent = enabled ? '运行中' : '已停止';
+            if (isTimerRunning) {
+                statusText.textContent = '运行中';
+            } else if (enabled && !isWhitelisted) {
+                statusText.textContent = '已开启（未在白名单）';
+            } else {
+                statusText.textContent = '已停止';
+            }
         }
 
+        // 当前站点域名
+        if (siteDomainText) {
+            siteDomainText.textContent = '📍 ' + getCurrentDomain();
+        }
+
+        // 白名单指示
+        if (whitelistIndicator) {
+            if (isWhitelisted) {
+                whitelistIndicator.textContent = '✓ 白名单中';
+                whitelistIndicator.className = 'qy-whitelist-indicator in';
+            } else {
+                whitelistIndicator.textContent = '✗ 未加入';
+                whitelistIndicator.className = 'qy-whitelist-indicator out';
+            }
+        }
+
+        // 白名单按钮
+        if (whitelistBtn) {
+            if (isWhitelisted) {
+                whitelistBtn.textContent = '移出白名单';
+                whitelistBtn.className = 'qy-btn-whitelist remove';
+            } else {
+                whitelistBtn.textContent = '加入白名单';
+                whitelistBtn.className = 'qy-btn-whitelist';
+            }
+        }
+
+        // 启停按钮
         if (toggleBtn) {
             toggleBtn.textContent = enabled ? '停止' : '开始';
             toggleBtn.className = 'qy-btn ' + (enabled ? 'qy-btn-stop' : 'qy-btn-start');
         }
 
+        // 倒计时
         if (countdownText) {
-            if (!enabled) {
+            if (!isTimerRunning) {
                 countdownText.textContent = '--';
                 countdownText.className = 'qy-countdown';
             } else {
@@ -602,8 +558,6 @@
         if (intervalInput) {
             intervalInput.value = intervalSec;
         }
-
-        updateWhitelistUI();
     }
 
     // ============================================================
@@ -659,45 +613,60 @@
     // ============================================================
 
     GM_registerMenuCommand('切换自动刷新（开/关）', toggle, 'T');
+    GM_registerMenuCommand('将当前站点加入白名单', addCurrentToWhitelist, 'A');
+    GM_registerMenuCommand('将当前站点移出白名单', removeCurrentFromWhitelist, 'D');
+    GM_registerMenuCommand('查看白名单列表', () => {
+        if (whitelist.length === 0) {
+            alert('白名单为空');
+        } else {
+            alert('当前白名单（共 ' + whitelist.length + ' 个站点）：\n\n' + whitelist.join('\n'));
+        }
+    });
+    GM_registerMenuCommand('清空白名单', () => {
+        if (whitelist.length === 0) {
+            showToast('白名单已为空，无需清空');
+            return;
+        }
+        if (confirm('确定要清空全部 ' + whitelist.length + ' 个白名单站点吗？')) {
+            stopTimer();
+            whitelist = [];
+            saveWhitelist();
+            updatePanel();
+            showToast('白名单已清空');
+        }
+    });
     GM_registerMenuCommand('设置间隔为 10 秒', () => {
         intervalSec = 10;
         intervalInput && (intervalInput.value = 10);
         saveState();
-        if (enabled) startTimer();
+        if (enabled && isCurrentSiteWhitelisted()) startTimer();
         showToast('间隔已更新为 10 秒');
     });
     GM_registerMenuCommand('设置间隔为 30 秒', () => {
         intervalSec = 30;
         intervalInput && (intervalInput.value = 30);
         saveState();
-        if (enabled) startTimer();
+        if (enabled && isCurrentSiteWhitelisted()) startTimer();
         showToast('间隔已更新为 30 秒');
     });
     GM_registerMenuCommand('设置间隔为 60 秒', () => {
         intervalSec = 60;
         intervalInput && (intervalInput.value = 60);
         saveState();
-        if (enabled) startTimer();
+        if (enabled && isCurrentSiteWhitelisted()) startTimer();
         showToast('间隔已更新为 60 秒');
     });
-
-    GM_registerMenuCommand('切换白名单模式（开/关）', toggleWhitelist, 'W');
-    GM_registerMenuCommand('将当前页面加入白名单', addCurrentPageToWhitelist, 'A');
 
     // ============================================================
     //  初始化
     // ============================================================
 
     function init() {
-        // 白名单模式：当前页面不在白名单中则不注入任何 UI
-        if (whitelistEnabled && !isUrlMatchWhitelist(location.href, whitelistUrls)) {
-            return; // 静默退出，不创建面板
-        }
-
         createPanel();
         updatePanel();
 
-        if (enabled) {
+        // 仅当已开启且当前站点在白名单中时才启动定时器
+        if (enabled && isCurrentSiteWhitelisted()) {
             startTimer();
         }
 
