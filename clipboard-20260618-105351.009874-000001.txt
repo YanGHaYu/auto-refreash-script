@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.1.0
 // @description  定时刷新当前页面，支持白名单站点、自定义间隔、启停控制和倒计时显示
-// @author       You
+// @author       yanghaoyuan
 // @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
